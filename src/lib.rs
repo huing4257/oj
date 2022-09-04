@@ -215,20 +215,21 @@ pub fn run_job(current_language: &mut Language
     //replace %INPUT% and %OUTPUT% of language
     let dir_path = format!("./problem{}", body.problem_id);
     let input_index = current_language.command.iter().position(|x| x == "%INPUT%").unwrap();
-    let file_path = format!("{}/user_{}.rs", dir_path, body.user_id);
+    let file_path = format!("{}/{}", dir_path,current_language.file_name );
     current_language.command[input_index] = file_path.clone();
     let output_index = current_language.command.iter().position(|x| x == "%OUTPUT%").unwrap();
     let out_path = format!("{}/user_{}", dir_path, body.user_id);
     current_language.command[output_index] = out_path.clone();
     // println!("{:?}", current_language);
 
-    //start to build
+    //start to compile
     create_dir(&dir_path).unwrap();
     fs::File::create(&file_path).unwrap();
     fs::write(file_path, &body.source_code).unwrap();
     let build_job = Command::new(&current_language.command[0])
         .args(&current_language.command[1..])
         .status().unwrap();
+
     if build_job.code() != Some(0) {
         job_result = Some(MyResult::CompilationError);
         job_response.cases[0].result = job_result.clone().unwrap();
