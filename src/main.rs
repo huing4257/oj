@@ -4,11 +4,14 @@ use clap::Parser;
 use env_logger;
 use log;
 use oj;
-use oj::{check_job, Config, PostJob};
+use oj::{Config, Language, PostJob, Problem, run_job, Reason, get_language_problem};
 use std::borrow::BorrowMut;
 use std::fs;
 use std::fs::create_dir;
 use std::process::{Command, Stdio};
+use actix_web::body::None;
+use actix_web::web::{Data, Json};
+use serde::Serialize;
 
 #[get("/hello/{name}")]
 async fn greet(name: web::Path<String>) -> impl Responder {
@@ -27,29 +30,31 @@ async fn exit() -> impl Responder {
 
 #[post("/jobs")]
 async fn post_jobs(body: web::Json<PostJob>, config: web::Data<Config>) -> impl Responder {
-    // if !check_job(&body.0, config.get_ref()) {
-    //     return HttpResponse::BadRequest().json(
-    //         "{reason=ERR_NOT_FOUND, code=3, HTTP 404 Not Found}"
-    //     );
-    // }
-    let temp_dir=format!("./problem{}",body.problem_id);
-    let temp_file=format!("{}/user_{}.rs",temp_dir,body.user_id);
-    let temp_bin=format!("{}/user_{}",temp_dir,body.user_id);
-    create_dir(temp_dir).unwrap();
-    fs::File::create(&temp_file).unwrap();
-    fs::write(&temp_file,&body.source_code).unwrap();
-    let build_job=std::process::Command::new("rustc")
-        .arg(&temp_file)
-        .arg("-o")
-        .arg(&temp_bin)
-        .status();
-    let run_job=std::process::Command::new(&temp_bin)
-        .stdout(Stdio::piped())
-        .output().unwrap();
-    println!("{}",String::from_utf8(run_job.stdout).unwrap());
-    HttpResponse::Ok().json("Ok")
-    // format!("{}", body.language)
+    let mut http_response=HttpResponse::new(Default::default());
+    let (current_language, current_problem) = get_language_problem(&body, &config);
+    if current_language.is_none()||current_problem.is_none() {
+        return  HttpResponse::BadRequest().json({});
+    }
+    let mut current_language = current_language.unwrap();
+    let mut current_problem = current_problem.unwrap();
+
+    match  run_job(&mut current_language,&mut current_problem,&body){
+        Ok(job_response)=>{
+            return HttpResponse::Ok().json(job_response)
+        }
+        Err(err)=>{
+            match err {
+                Reason::ErrNotFound=> {
+                    return  HttpResponse::BadRequest().json("{}")
+                }
+                _=>unimplemented!()
+            }
+
+        }
+    }
 }
+
+
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
