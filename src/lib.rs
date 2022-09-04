@@ -1,3 +1,4 @@
+use actix_web::Responder;
 use actix_web::web::Json;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -64,10 +65,40 @@ pub struct Config {
 
 #[derive(Serialize, Deserialize)]
 pub struct PostJob {
-    source_code: String,
-    language: String,
-    user_id: String,
-    contest_id: String,
-    problem_id: String,
+    pub source_code: String,
+    pub language: String,
+    pub user_id: i32,
+    pub contest_id: i32,
+    pub problem_id: i32,
 }
 
+pub enum JobResult{
+    Waiting,
+    Running,
+    Accepted,
+}
+
+
+pub enum Reason {
+    ErrInvalidArgument,
+    ErrNotFound,
+    ErrRateLimit,
+    ErrExternal,
+    ErrInternal
+}
+
+pub fn check_job(job:&PostJob,config:&Config)->bool{
+    let mut is_lan_in=false;
+    for language in &config.languages {
+        if language.name== job.language{
+            is_lan_in=true;
+        }
+    }
+    let mut is_prob_in=false;
+    for problem in &config.problems{
+        if problem.id==job.problem_id {
+            is_lan_in=true;
+        }
+    }
+    return is_prob_in&&is_lan_in
+}
