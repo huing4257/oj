@@ -1,18 +1,18 @@
-use actix_web::{get, middleware::Logger, post, web, App, HttpResponse, HttpServer, Responder};
-use chrono::prelude::*;
+use std::borrow::{Borrow, BorrowMut};
+use actix_web::{get, put, middleware::Logger, post, web, App, HttpResponse, HttpServer, Responder};
 use clap::Parser;
 use env_logger;
 use log;
 use oj;
-use oj::{Config, Language, PostJob, Problem, run_job, Reason, get_language_problem};
-use std::borrow::BorrowMut;
+use oj::{Config, PostJob, run_job, Job, match_job, Reason};
 use std::fs;
-use std::fs::create_dir;
-use std::process::{Command, Stdio};
-use actix_web::body::None;
-use actix_web::web::{Data, Json};
-use serde::Serialize;
-
+use actix_web;
+use std::sync::{Arc, Mutex};
+use actix_web::web::Path;
+use lazy_static::lazy_static;
+lazy_static! {
+    static ref JOB_LIST: Arc<Mutex<Vec<Job >>> = Arc::new(Mutex::new(Vec::new()));
+}
 #[get("/hello/{name}")]
 async fn greet(name: web::Path<String>) -> impl Responder {
     log::info!(target: "greet_handler", "Greeting {}", name);
@@ -30,31 +30,85 @@ async fn exit() -> impl Responder {
 
 #[post("/jobs")]
 async fn post_jobs(body: web::Json<PostJob>, config: web::Data<Config>) -> impl Responder {
-    let mut http_response=HttpResponse::new(Default::default());
-    let (current_language, current_problem) = get_language_problem(&body, &config);
-    if current_language.is_none()||current_problem.is_none() {
-        return  HttpResponse::BadRequest().json({});
-    }
-    let mut current_language = current_language.unwrap();
-    let mut current_problem = current_problem.unwrap();
-
-    match  run_job(&mut current_language,&mut current_problem,&body){
-        Ok(job_response)=>{
-            return HttpResponse::Ok().json(job_response)
+    println!("0");
+    let response:HttpResponse;
+    let mut lock =JOB_LIST.lock().unwrap();
+    let id=lock.len();
+    //create a job
+    let mut job=Job::new(id as i32,&body.0);
+    match run_job(&mut job,&config) {
+        Ok(_) => {
+            response=HttpResponse::Ok().json(&job)
         }
-        Err(err)=>{
-            match err {
-                Reason::ErrNotFound=> {
-                    return  HttpResponse::BadRequest().json("{}")
-                }
-                _=>unimplemented!()
-            }
-
+        Err(err) => {
+            response= HttpResponse::NotFound().json(err)
         }
-    }
+    };
+    //push modified job
+    lock.push(job);
+    response
 }
 
 
+#[get("/jobs")]
+async fn get_jobs(body: web::Query<oj::GetJob>) -> impl Responder {
+    let mut return_list: Vec<Job> = vec![];
+    for i in &*JOB_LIST.lock().unwrap() {
+        if match_job(&body, i) {
+            return_list.push(i.clone());
+        }
+    }
+    println!("1");
+    return HttpResponse::Ok().json(return_list);
+}
+
+#[get("/jobs/{job_id}")]
+async fn get_job(job_id: Path<i32>) -> impl Responder {
+    let mut job: Option<Job> = None;
+    let id: i32 = job_id.into_inner();
+    for i in &*JOB_LIST.lock().unwrap() {
+        if i.id == id {
+            job = Some(i.clone());
+        }
+    }
+    return match job {
+        Some(a) => {
+            HttpResponse::Ok().json(a)
+        }
+        None => {
+            HttpResponse::NotFound().json("{ reason=ERR_NOT_FOUND, code=3, message=\"Job 123456 not found.\"}")
+        }
+    };
+}
+
+#[put("/jobs/{job_id}")]
+async fn put_job(job_id: Path<i32>, config: web::Data<Config>) -> impl Responder {
+    let mut job: Option<&mut Job> = None;
+    let id: i32 = job_id.into_inner();
+    let mut lock=JOB_LIST.lock().unwrap();
+    for i in lock.borrow_mut().iter_mut(){
+        if i.id == id {
+            job = Some(i);
+        }
+    }
+    if let None=job{
+        return HttpResponse::NotFound().json(oj::Error{
+            reason: Reason::ErrNotFound,
+            code: 3,
+            message: "Job 123456 not found.".to_string()
+        })
+    }
+    let mut job=job.unwrap();
+    match run_job(&mut job, &config) {
+        Ok(job_response) => {
+            HttpResponse::Ok().json(job_response);
+        }
+        Err(err) => {
+            HttpResponse::NotFound().json(err);
+        }
+    }
+    HttpResponse::Ok().json(job.clone())
+}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -68,10 +122,13 @@ async fn main() -> std::io::Result<()> {
             .route("/hello", web::get().to(|| async { "Hello World!" }))
             .service(greet)
             .service(post_jobs)
+            .service(get_jobs)
+            .service(get_job)
+            .service(put_job)
             // DO NOT REMOVE: used in automatic testing
             .service(exit)
     })
-    .bind(("127.0.0.1", 12345))?
-    .run()
-    .await
+        .bind(("127.0.0.1", 12345))?
+        .run()
+        .await
 }
