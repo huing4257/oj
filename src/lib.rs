@@ -3,14 +3,13 @@ use actix_web;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use serde_json::Value;
 use std::fs;
 use std::fs::create_dir;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use actix_web::{ web};
-use chrono::{DateTime, FixedOffset, Offset, Utc};
+use actix_web::{web};
+use chrono::{DateTime, FixedOffset, Utc};
 use wait_timeout::ChildExt;
 
 
@@ -60,8 +59,14 @@ pub struct Problem {
     name: String,
     #[serde(rename = "type")]
     pub ty: String,
-    misc: Option<Value>,
+    misc: Misc,
     pub cases: Vec<Case>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Misc {
+    packing: Option<Vec<Vec<i32>>>,
+    special_judge: Option<Vec<String>>,
 }
 
 ///code language, also contains commands to build a program
@@ -256,10 +261,10 @@ pub struct RankRule {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct UserRank{
-    pub  user:User,
-    pub rank:i32,
-    pub scores:Vec<f64>
+pub struct UserRank {
+    pub user: User,
+    pub rank: i32,
+    pub scores: Vec<f64>,
 }
 
 
@@ -274,8 +279,6 @@ pub fn run_job(
 ) -> Result<(), Error> {
     let mut current_language: Option<Language> = None;
     let mut problem: Option<Problem> = None;
-
-    //initialize job
 
     //check and get problem and language
     for language in &config.languages {
@@ -401,6 +404,11 @@ pub fn run_job(
                                         is_match = true;
                                     }
                                 }
+                                "spj"=>{
+                                    // let spj=problem.misc.special_judge.clone().unwrap();
+                                    // std::process::Command::new(&spj[0]);
+
+                                }
                                 _ => unimplemented!(),
                             }
 
@@ -442,6 +450,7 @@ pub fn run_job(
     if job.score == 100.0 {
         job.result = MyResult::Accepted;
     }
+    job_packing_cases(job, config);
     job.final_result();
     // let a = serde_json::to_string_pretty(&job).unwrap();
     // println!("{}", a);
@@ -511,53 +520,60 @@ pub fn get_user_submissions(user: &User, job_list: &Vec<Job>) -> Vec<Job> {
     sub_list
 }
 
-pub fn get_score_list(a:&Vec<Job>,rule:&RankRule,config:&Config)->Vec<f64>{
-    let mut vec:Vec<f64>=vec![];
-    for problem in config.problems.iter(){
-        let mut score=0.0;
-        let mut time:DateTime<FixedOffset> = chrono::DateTime::default();
-
-        for i in a {
-            if i.submission.problem_id ==problem.id{
-                let i_time:DateTime<FixedOffset>=chrono::DateTime::from_str(&i.created_time).unwrap();
+pub fn get_score_list(a: &Vec<Job>, rule: &RankRule, config: &Config) -> (Vec<f64>, Vec<usize>) {
+    let mut scores: Vec<f64> = vec![];
+    let mut indexes: Vec<usize> = vec![];
+    for problem in config.problems.iter() {
+        let mut score = 0.0;
+        let mut time: DateTime<FixedOffset> = chrono::DateTime::default();
+        let mut index: usize = 0;
+        for i in 0..a.len() {
+            if a[i].submission.problem_id == problem.id {
+                let i_time: DateTime<FixedOffset> = chrono::DateTime::from_str(&a[i].created_time).unwrap();
                 match rule.scoring_rule {
                     ScoringRule::Latest => {
-                        if  {i_time>= time }{
-                            time=i_time;
-                            score=i.score;
+                        if i_time >= time {
+                            time = i_time;
+                            score = a[i].score;
+                            index = i;
                         }
                     }
                     ScoringRule::Highest => {
-                        if i.score>score {
-                            score=i.score
+                        if a[i].score > score {
+                            score = a[i].score;
+                            index = i;
                         }
                     }
                 }
             }
         }
-        vec.push(score);
+        scores.push(score);
+        indexes.push(index);
     }
-    vec
+    (scores, indexes)
 }
 
-pub fn compare_users(a: &Vec<Job>, b:& Vec<Job>,s: (f64,f64),rule:& RankRule) -> Ordering {
-    let (a_score ,b_score)=s;
+pub fn compare_users(a: &Vec<Job>, b: &Vec<Job>, s: (f64, f64), ind: (Vec<usize>, Vec<usize>), rule: &RankRule) -> Ordering {
+    let (a_score, b_score) = s;
+    let (a_indexes, b_indexes) = ind;
+    let a_index = a_indexes.iter().max().unwrap();
+    let b_index = b_indexes.iter().max().unwrap();
     if a_score == b_score {
-        let a= match rule.tie_breaker {
+        let a = match rule.tie_breaker {
             TieBreaker::SubmissionTime => {
-                let ast=serde_json::to_string_pretty(a).unwrap();
-                let bst=serde_json::to_string_pretty(b).unwrap();
-                println!("{},{}",ast,bst);
-                let a_time:DateTime<FixedOffset>=chrono::DateTime::from_str(&a[0].created_time).unwrap();
-                let b_time:DateTime<FixedOffset>=chrono::DateTime::from_str(&b[0].created_time).unwrap();
+                let ast = serde_json::to_string_pretty(a).unwrap();
+                let bst = serde_json::to_string_pretty(b).unwrap();
+                println!("{},{}", ast, bst);
+                let a_time: DateTime<FixedOffset> = chrono::DateTime::from_str(&a[*a_index].created_time).unwrap();
+                let b_time: DateTime<FixedOffset> = chrono::DateTime::from_str(&b[*b_index].created_time).unwrap();
                 b_time.cmp(&a_time)
             }
             TieBreaker::SubmissionCount => {
-                 b.len().cmp(&a.len() )
+                b.len().cmp(&a.len())
             }
             TieBreaker::UserId => {
                 println!("HELLO!");
-                 b[0].submission.user_id.cmp(&a[0].submission.user_id)
+                b[0].submission.user_id.cmp(&a[0].submission.user_id)
             }
             TieBreaker::None => {
                 Ordering::Equal
@@ -566,4 +582,35 @@ pub fn compare_users(a: &Vec<Job>, b:& Vec<Job>,s: (f64,f64),rule:& RankRule) ->
         return a;
     }
     a_score.partial_cmp(&b_score).unwrap()
+}
+
+pub fn job_packing_cases(job: &mut Job, config: &Config) {
+    for problem in &config.problems {
+        if problem.id == job.submission.problem_id {
+            if let Some(packing) = &problem.misc.packing {
+                let mut total_score = 0.0;
+                for pack in packing {
+                    let mut score = 0.0;
+                    let mut is_accepted = true;
+                    for case_id in pack {
+                        let case_id=*case_id as f64;
+                        if !is_accepted {
+                            job.cases[case_id as usize].result = MyResult::Skipped;
+                        }
+                        match job.cases[case_id as usize].result {
+                            MyResult::Accepted => {
+                                score += config.problems[job.submission.problem_id as usize].cases[case_id as usize].score;
+                            }
+                            _ => {
+                                is_accepted = false;
+                            }
+                        }
+                    }
+
+                    if is_accepted { total_score += score; }
+                }
+                job.score = total_score;
+            }
+        }
+    }
 }
