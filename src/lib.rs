@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use actix_web;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -7,9 +8,9 @@ use std::fs;
 use std::fs::create_dir;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-use actix_web::{HttpResponse, web};
-use actix_web::web::Data;
-use chrono::{DateTime, Utc};
+use std::str::FromStr;
+use actix_web::{ web};
+use chrono::{DateTime, FixedOffset, Offset, Utc};
 use wait_timeout::ChildExt;
 
 
@@ -126,7 +127,7 @@ impl CaseResult {
 }
 
 ///the test state of a whole post job
-#[derive(Serialize, Deserialize, Clone,Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Eq, PartialEq)]
 pub enum State {
     Queueing,
     Running,
@@ -143,23 +144,24 @@ pub struct Job {
     pub submission: PostJob,
     state: State,
     result: MyResult,
-    score: f64,
+    pub score: f64,
     cases: Vec<CaseResult>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct Error{
-    pub reason:Reason,
-    pub code:i32,
-    pub message:String
+pub struct Error {
+    pub reason: Reason,
+    pub code: i32,
+    pub message: String,
 }
+
 ///get formatted current time
 fn my_now() -> String {
     Utc::now().format(TIME_FMT).to_string()
 }
 
 impl Job {
-    pub fn new(id:i32,post: &PostJob) -> Job {
+    pub fn new(id: i32, post: &PostJob) -> Job {
         Job {
             id,
             created_time: my_now(),
@@ -211,17 +213,63 @@ pub enum MyResult {
 /// reasons why a request failed
 #[derive(Serialize, Deserialize, Clone)]
 pub enum Reason {
+    #[serde(rename = "ERR_INVALID_ARGUMENT")]
     ErrInvalidArgument,
-    #[serde(rename="ERR_NOT_FOUND")]
+    #[serde(rename = "ERR_NOT_FOUND")]
     ErrNotFound,
     ErrRateLimit,
     ErrExternal,
     ErrInternal,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct User {
+    pub id: Option<i32>,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub enum ScoringRule {
+    #[serde(rename = "latest")]
+    Latest,
+    #[serde(rename = "highest")]
+    Highest,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub enum TieBreaker {
+    #[serde(rename = "submission_time")]
+    SubmissionTime,
+    #[serde(rename = "submission_count")]
+    SubmissionCount,
+    #[serde(rename = "user_id")]
+    UserId,
+    None,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct RankRule {
+    #[serde(default = "scoring_rule_default")]
+    scoring_rule: ScoringRule,
+    #[serde(default = "tie_breaker_default")]
+    tie_breaker: TieBreaker,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct UserRank{
+    pub  user:User,
+    pub rank:i32,
+    pub scores:Vec<f64>
+}
+
+
+fn scoring_rule_default() -> ScoringRule { ScoringRule::Latest }
+
+fn tie_breaker_default() -> TieBreaker { TieBreaker::None }
+
 ///use language, problem information, run a post job update job_list
 pub fn run_job(
-    job:&mut Job,
+    job: &mut Job,
     config: &web::Data<Config>,
 ) -> Result<(), Error> {
     let mut current_language: Option<Language> = None;
@@ -241,20 +289,21 @@ pub fn run_job(
         }
     }
     if current_language.is_none() || problem.is_none() {
-        return Err(Error{
+        return Err(Error {
             reason: Reason::ErrNotFound,
             code: 3,
-            message: "".to_string()
+            message: "".to_string(),
         });
     }
-    let mut current_language=current_language.unwrap();
-    let problem=problem.unwrap();
-    let mut job_result: Option<MyResult> = None;
 
+    let mut current_language = current_language.unwrap();
+    let problem = problem.unwrap();
+
+    let mut job_result: Option<MyResult> = None;
     //initialize job cases, clear and push default
     {
-        job.result=MyResult::Waiting;
-        job.score=0.0;
+        job.result = MyResult::Waiting;
+        job.score = 0.0;
         job.cases.clear();
         let mut count = 0;
         job.cases.push(CaseResult::new(count));
@@ -292,14 +341,14 @@ pub fn run_job(
         .unwrap();
 
     if build_job.code() != Some(0) {
-        job_result=Some(MyResult::CompilationError);
+        job_result = Some(MyResult::CompilationError);
 
-        job.cases[0].result=MyResult::CompilationError;
+        job.cases[0].result = MyResult::CompilationError;
         job.final_result();
         //if compile error, return.
     } else {
         //compile succeed
-        job.cases[0].result=MyResult::CompilationSuccess;
+        job.cases[0].result = MyResult::CompilationSuccess;
         job.update();
 
         //case by case
@@ -375,15 +424,14 @@ pub fn run_job(
             }
             //handle case result
             match case_result {
-                MyResult::Accepted => {
-                }
+                MyResult::Accepted => {}
                 _ => {
                     if let None = job_result {
                         job_result = Some(case_result.clone())
                     }
                 }
             }
-            job.cases[case_id].result=case_result;
+            job.cases[case_id].result = case_result;
             job.update();
         }
     }
@@ -400,7 +448,7 @@ pub fn run_job(
     Ok(())
 }
 
-pub fn match_job(require: &GetJob, job:&Job) -> bool {
+pub fn match_job(require: &GetJob, job: &Job, user_list: &Vec<User>) -> bool {
     //any option unsatisfied, return false
     if let Some(parameter) = &require.result {
         if job.result != *parameter {
@@ -422,12 +470,12 @@ pub fn match_job(require: &GetJob, job:&Job) -> bool {
         }
     }
     if let Some(parameter) = &require.language {
-        if parameter!=&job.submission.language {
-            return false
+        if parameter != &job.submission.language {
+            return false;
         }
     }
     if let Some(parameter) = &require.state {
-        if parameter!=&job.state {
+        if parameter != &job.state {
             return false;
         }
     }
@@ -440,11 +488,82 @@ pub fn match_job(require: &GetJob, job:&Job) -> bool {
     //
     // }
     //
-    // if let Some(parameter)=&require.user_id{
-    //
-    // }
-    // if let Some(parameter)=&require.user_name{
-    //
-    // }
+    if let Some(parameter) = &require.user_id {
+        if parameter != &job.submission.user_id {
+            return false;
+        }
+    }
+    if let Some(parameter) = &require.user_name {
+        if parameter != &(user_list[job.submission.user_id as usize]).name {
+            return false;
+        }
+    }
     true
+}
+
+pub fn get_user_submissions(user: &User, job_list: &Vec<Job>) -> Vec<Job> {
+    let mut sub_list: Vec<Job> = vec![];
+    for job in job_list {
+        if job.submission.user_id == user.id.unwrap() {
+            sub_list.push(job.clone());
+        }
+    }
+    sub_list
+}
+
+pub fn get_score_list(a:&Vec<Job>,rule:&RankRule,config:&Config)->Vec<f64>{
+    let mut vec:Vec<f64>=vec![];
+    for problem in config.problems.iter(){
+        let mut score=0.0;
+        let mut time:DateTime<FixedOffset> = chrono::DateTime::default();
+
+        for i in a {
+            if i.submission.problem_id ==problem.id{
+                let i_time:DateTime<FixedOffset>=chrono::DateTime::from_str(&i.created_time).unwrap();
+                match rule.scoring_rule {
+                    ScoringRule::Latest => {
+                        if  {i_time>= time }{
+                            time=i_time;
+                            score=i.score;
+                        }
+                    }
+                    ScoringRule::Highest => {
+                        if i.score>score {
+                            score=i.score
+                        }
+                    }
+                }
+            }
+        }
+        vec.push(score);
+    }
+    vec
+}
+
+pub fn compare_users(a: &Vec<Job>, b:& Vec<Job>,s: (f64,f64),rule:& RankRule) -> Ordering {
+    let (a_score ,b_score)=s;
+    if a_score == b_score {
+        let a= match rule.tie_breaker {
+            TieBreaker::SubmissionTime => {
+                let ast=serde_json::to_string_pretty(a).unwrap();
+                let bst=serde_json::to_string_pretty(b).unwrap();
+                println!("{},{}",ast,bst);
+                let a_time:DateTime<FixedOffset>=chrono::DateTime::from_str(&a[0].created_time).unwrap();
+                let b_time:DateTime<FixedOffset>=chrono::DateTime::from_str(&b[0].created_time).unwrap();
+                b_time.cmp(&a_time)
+            }
+            TieBreaker::SubmissionCount => {
+                 b.len().cmp(&a.len() )
+            }
+            TieBreaker::UserId => {
+                println!("HELLO!");
+                 b[0].submission.user_id.cmp(&a[0].submission.user_id)
+            }
+            TieBreaker::None => {
+                Ordering::Equal
+            }
+        };
+        return a;
+    }
+    a_score.partial_cmp(&b_score).unwrap()
 }
