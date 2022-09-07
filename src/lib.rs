@@ -58,14 +58,14 @@ pub struct Problem {
     pub id: i32,
     name: String,
     #[serde(rename = "type")]
-    pub ty: String,
+    pub ty: ProblemType,
     misc: Misc,
     pub cases: Vec<Case>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Misc {
-    packing: Option<Vec<Vec<i32>>>,
+    packing: Option<Vec<Vec<usize>>>,
     special_judge: Option<Vec<String>>,
 }
 
@@ -215,6 +215,15 @@ pub enum MyResult {
     Skipped,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemType {
+    Standard,
+    Strict,
+    Spj,
+    DynamicRanking,
+}
+
 /// reasons why a request failed
 #[derive(Serialize, Deserialize, Clone)]
 pub enum Reason {
@@ -348,99 +357,42 @@ pub fn run_job(
 
         job.cases[0].result = MyResult::CompilationError;
         job.final_result();
-        //if compile error, return.
+        //if compile error
     } else {
+
         //compile succeed
         job.cases[0].result = MyResult::CompilationSuccess;
         job.update();
+        let packing: Vec<Vec<usize>>;
+        match problem.misc.packing.clone() {
+            None => packing = vec![(1..=problem.cases.len()).collect()],
+            Some(p) => packing = p
+        }
 
         //case by case
-        let mut case_id = 0;
-        for case in &problem.cases {
-            case_id += 1;
-            //var to record result
-            let case_result: MyResult;
-            let mut run_case = Command::new(&out_path)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn()
-                .unwrap();
-            run_case
-                .stdin
-                .take()
-                .unwrap()
-                .write(fs::read_to_string(&case.input_file).unwrap().as_bytes())
-                .unwrap();
-            let time_limit = std::time::Duration::from_micros(case.time_limit as u64);
-
-            //use time limit, get case result
-            match run_case.wait_timeout(time_limit).unwrap() {
-                None => {
-                    run_case.kill().unwrap();
-                    case_result = MyResult::TimeLimitExceeded;
-                    job.update();
-                }
-                Some(s) => {
-                    match s.code().unwrap() {
-                        0 => {
-                            //run successfully, match result
-                            let out = run_case.stdout;
-                            let mut output = String::new();
-                            out.unwrap().read_to_string(&mut output).unwrap();
-                            let ans = fs::read_to_string(&case.answer_file).unwrap();
-
-                            let mut is_match = false;
-                            match &problem.ty[..] {
-                                "standard" => {
-                                    let a: Vec<&str> =
-                                        output.split("\n").map(|x| x.trim()).collect();
-                                    let b: Vec<&str> = ans.split("\n").map(|x| x.trim()).collect();
-                                    if a == b {
-                                        is_match = true;
-                                    }
-                                }
-                                "strict" => {
-                                    if ans == output {
-                                        is_match = true;
-                                    }
-                                }
-                                "spj"=>{
-                                    // let spj=problem.misc.special_judge.clone().unwrap();
-                                    // std::process::Command::new(&spj[0]);
-
-                                }
-                                _ => unimplemented!(),
+        // let mut case_id = 0;
+        for pack in packing {
+            let mut is_pack_accepted = true;
+            for case_id in pack {
+                // case_id += 1;
+                //var to record result
+                let case_result: MyResult;
+                if is_pack_accepted{
+                    case_result = run_one_case(job, &problem, &out_path, &problem.cases[case_id - 1]);
+                    //let first wrong case result be job result
+                    match case_result {
+                        MyResult::Accepted => {}
+                        _ => {
+                            if let None = job_result {
+                                job_result = Some(case_result.clone())
                             }
-
-                            //got result, update response
-                            if is_match {
-                                job.score += case.score;
-                                case_result = MyResult::Accepted;
-                                job.update();
-                            } else {
-                                case_result = MyResult::WrongAnswer;
-                                job.update();
-                            }
-                        }
-                        a => {
-                            println!("{:?}", a);
-                            case_result = MyResult::RuntimeError;
-                            job.update();
+                            is_pack_accepted = false;
                         }
                     }
-                }
+                }else { case_result=MyResult::Skipped }
+                job.cases[case_id].result = case_result;
+                job.update();
             }
-            //handle case result
-            match case_result {
-                MyResult::Accepted => {}
-                _ => {
-                    if let None = job_result {
-                        job_result = Some(case_result.clone())
-                    }
-                }
-            }
-            job.cases[case_id].result = case_result;
-            job.update();
         }
     }
     fs::remove_dir_all(&dir_path).unwrap();
@@ -450,11 +402,85 @@ pub fn run_job(
     if job.score == 100.0 {
         job.result = MyResult::Accepted;
     }
-    job_packing_cases(job, config);
+    // job_packing_cases(job, config);
     job.final_result();
     // let a = serde_json::to_string_pretty(&job).unwrap();
     // println!("{}", a);
     Ok(())
+}
+
+fn run_one_case(job: &mut Job, problem: &Problem, out_path: &String, case: &Case) -> MyResult {
+    let case_result: MyResult;
+    let mut run_case = Command::new(&out_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    run_case
+        .stdin
+        .take()
+        .unwrap()
+        .write(fs::read_to_string(&case.input_file).unwrap().as_bytes())
+        .unwrap();
+    let time_limit = std::time::Duration::from_micros(case.time_limit as u64);
+
+    //use time limit, get case result
+    match run_case.wait_timeout(time_limit).unwrap() {
+        None => {
+            run_case.kill().unwrap();
+            case_result = MyResult::TimeLimitExceeded;
+            job.update();
+        }
+        Some(s) => {
+            match s.code().unwrap() {
+                0 => {
+                    //run successfully, match result
+                    let out = run_case.stdout;
+                    let mut output = String::new();
+                    out.unwrap().read_to_string(&mut output).unwrap();
+                    let ans = fs::read_to_string(&case.answer_file).unwrap();
+
+                    let mut is_match = false;
+                    match &problem.ty {
+                        ProblemType::Standard => {
+                            let a: Vec<&str> =
+                                output.split("\n").map(|x| x.trim()).collect();
+                            let b: Vec<&str> = ans.split("\n").map(|x| x.trim()).collect();
+                            if a == b {
+                                is_match = true;
+                            }
+                        }
+                        ProblemType::Strict => {
+                            if ans == output {
+                                is_match = true;
+                            }
+                        }
+                        ProblemType::Spj => {
+                            // let spj=problem.misc.special_judge.clone().unwrap();
+                            // std::process::Command::new(&spj[0]);
+                        }
+                        ProblemType::DynamicRanking => {}
+                    }
+
+                    //got result, update response
+                    if is_match {
+                        job.score += case.score;
+                        case_result = MyResult::Accepted;
+                        job.update();
+                    } else {
+                        case_result = MyResult::WrongAnswer;
+                        job.update();
+                    }
+                }
+                a => {
+                    println!("{:?}", a);
+                    case_result = MyResult::RuntimeError;
+                    job.update();
+                }
+            }
+        }
+    }
+    case_result
 }
 
 pub fn match_job(require: &GetJob, job: &Job, user_list: &Vec<User>) -> bool {
@@ -582,35 +608,4 @@ pub fn compare_users(a: &Vec<Job>, b: &Vec<Job>, s: (f64, f64), ind: (Vec<usize>
         return a;
     }
     a_score.partial_cmp(&b_score).unwrap()
-}
-
-pub fn job_packing_cases(job: &mut Job, config: &Config) {
-    for problem in &config.problems {
-        if problem.id == job.submission.problem_id {
-            if let Some(packing) = &problem.misc.packing {
-                let mut total_score = 0.0;
-                for pack in packing {
-                    let mut score = 0.0;
-                    let mut is_accepted = true;
-                    for case_id in pack {
-                        let case_id=*case_id as f64;
-                        if !is_accepted {
-                            job.cases[case_id as usize].result = MyResult::Skipped;
-                        }
-                        match job.cases[case_id as usize].result {
-                            MyResult::Accepted => {
-                                score += config.problems[job.submission.problem_id as usize].cases[case_id as usize].score;
-                            }
-                            _ => {
-                                is_accepted = false;
-                            }
-                        }
-                    }
-
-                    if is_accepted { total_score += score; }
-                }
-                job.score = total_score;
-            }
-        }
-    }
 }
