@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 use actix_web::{web};
 use chrono::{DateTime, FixedOffset, Utc};
+use serde_json::Value;
 use wait_timeout::ChildExt;
 
 
@@ -373,26 +374,34 @@ pub fn run_job(
         // let mut case_id = 0;
         for pack in packing {
             let mut is_pack_accepted = true;
+            let mut pack_score = 0.0;
             for case_id in pack {
                 // case_id += 1;
                 //var to record result
-                let case_result: MyResult;
-                if is_pack_accepted{
-                    case_result = run_one_case(job, &problem, &out_path, &problem.cases[case_id - 1]);
-                    //let first wrong case result be job result
-                    match case_result {
-                        MyResult::Accepted => {}
+                let mut case_result=CaseResult::new(case_id as i32);
+                if is_pack_accepted {
+                    case_result = run_one_case(&problem, &out_path, case_id);
+                    //let first wrong case result be job result, decide whether go on
+                    match case_result.result {
+                        MyResult::Accepted => {
+                            pack_score += &problem.cases[case_id - 1].score;
+                        }
                         _ => {
                             if let None = job_result {
-                                job_result = Some(case_result.clone())
+                                job_result = Some(case_result.result.clone())
                             }
                             is_pack_accepted = false;
+                            pack_score = 0.0;
                         }
                     }
-                }else { case_result=MyResult::Skipped }
-                job.cases[case_id].result = case_result;
+                } else {
+                    case_result.result = MyResult::Skipped;
+                }
+                job.cases[case_id]= case_result;
                 job.update();
             }
+            job.score += pack_score;
+            job.update();
         }
     }
     fs::remove_dir_all(&dir_path).unwrap();
@@ -409,8 +418,9 @@ pub fn run_job(
     Ok(())
 }
 
-fn run_one_case(job: &mut Job, problem: &Problem, out_path: &String, case: &Case) -> MyResult {
-    let case_result: MyResult;
+fn run_one_case(problem: &Problem, out_path: &String, case_id:usize) -> CaseResult {
+    let case=&problem.cases[case_id - 1];
+    let mut case_result=CaseResult::new(case_id as i32);
     let mut run_case = Command::new(&out_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -428,8 +438,7 @@ fn run_one_case(job: &mut Job, problem: &Problem, out_path: &String, case: &Case
     match run_case.wait_timeout(time_limit).unwrap() {
         None => {
             run_case.kill().unwrap();
-            case_result = MyResult::TimeLimitExceeded;
-            job.update();
+            case_result.result = MyResult::TimeLimitExceeded;
         }
         Some(s) => {
             match s.code().unwrap() {
@@ -440,47 +449,86 @@ fn run_one_case(job: &mut Job, problem: &Problem, out_path: &String, case: &Case
                     out.unwrap().read_to_string(&mut output).unwrap();
                     let ans = fs::read_to_string(&case.answer_file).unwrap();
 
-                    let mut is_match = false;
                     match &problem.ty {
                         ProblemType::Standard => {
                             let a: Vec<&str> =
                                 output.split("\n").map(|x| x.trim()).collect();
                             let b: Vec<&str> = ans.split("\n").map(|x| x.trim()).collect();
                             if a == b {
-                                is_match = true;
+                                case_result.result = MyResult::Accepted;
+                            } else {
+                                case_result.result = MyResult::WrongAnswer;
                             }
                         }
                         ProblemType::Strict => {
                             if ans == output {
-                                is_match = true;
+                                case_result.result = MyResult::Accepted;
+                            } else {
+                                case_result.result = MyResult::WrongAnswer;
                             }
                         }
                         ProblemType::Spj => {
-                            // let spj=problem.misc.special_judge.clone().unwrap();
-                            // std::process::Command::new(&spj[0]);
+                            let spj_result=special_judge(problem, case,  output);
+                            case_result.result =spj_result.0;
+                            case_result.info=spj_result.1;
                         }
-                        ProblemType::DynamicRanking => {}
+                        ProblemType::DynamicRanking => {
+                            case_result.result = MyResult::Waiting
+                        }
                     }
-
                     //got result, update response
-                    if is_match {
-                        job.score += case.score;
-                        case_result = MyResult::Accepted;
-                        job.update();
-                    } else {
-                        case_result = MyResult::WrongAnswer;
-                        job.update();
-                    }
                 }
-                a => {
-                    println!("{:?}", a);
-                    case_result = MyResult::RuntimeError;
-                    job.update();
+                _ => {
+                    case_result.result = MyResult::RuntimeError;
                 }
             }
         }
     }
     case_result
+}
+
+fn special_judge(problem: &Problem, case: &Case, mut output: String) ->(MyResult,String){
+    let case_result:MyResult;
+    let mut spj_info=String::new();
+    let mut spj = problem.misc.special_judge.clone().unwrap();
+    let output_file = format!("./problem{}/output", problem.id);
+    fs::File::create(&output_file).unwrap()
+        .write(output.as_bytes()).unwrap();
+    let out_index = spj.iter().position(|x| x == "%OUTPUT%").unwrap();
+    let ans_index = spj.iter().position(|x| x == "%ANSWER%").unwrap();
+    spj[out_index] = output_file;
+    spj[ans_index] = case.answer_file.clone();
+    let spj_out = Command::new(&spj[0])
+        .args(&spj[1..])
+        .stdout(Stdio::piped())
+        .output()
+        .unwrap();
+    if spj_out.status.success() {
+        let spj_result = String::from_utf8(spj_out.stdout).unwrap();
+        match spj_result.lines().nth(0) {
+            None => {
+                case_result = MyResult::SPJError
+            }
+            Some(result) => {
+                let s: serde_json::Result<MyResult> = serde_json::from_str(&format!("\"{}\"", result));
+                match s {
+                    Ok(r) => {
+                        case_result = r;
+                    },
+                    Err(_) => case_result = MyResult::SystemError,
+                }
+            }
+        }
+        match spj_result.lines().nth(1) {
+            None => {}
+            Some(s) => {
+                spj_info=s.to_string();
+            }
+        }
+    } else {
+        case_result = MyResult::Accepted;
+    }
+    (case_result,spj_info)
 }
 
 pub fn match_job(require: &GetJob, job: &Job, user_list: &Vec<User>) -> bool {
