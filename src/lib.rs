@@ -8,9 +8,9 @@ use std::fs::create_dir;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
+use std::time::Duration;
 use actix_web::{web};
 use chrono::{DateTime, FixedOffset, Utc};
-use serde_json::Value;
 use wait_timeout::ChildExt;
 
 
@@ -68,6 +68,7 @@ pub struct Problem {
 pub struct Misc {
     packing: Option<Vec<Vec<usize>>>,
     special_judge: Option<Vec<String>>,
+    dynamic_ranking_ratio: Option<f64>,
 }
 
 ///code language, also contains commands to build a program
@@ -348,11 +349,12 @@ pub fn run_job(
     create_dir(&dir_path).unwrap();
     fs::File::create(&file_path).unwrap();
     fs::write(file_path, &job.submission.source_code).unwrap();
+    let build_time = std::time::Instant::now();
     let build_job = Command::new(&current_language.command[0])
         .args(&current_language.command[1..])
         .status()
         .unwrap();
-
+    job.cases[0].time = build_time.elapsed().as_micros() as i32;
     if build_job.code() != Some(0) {
         job_result = Some(MyResult::CompilationError);
 
@@ -376,15 +378,18 @@ pub fn run_job(
             let mut is_pack_accepted = true;
             let mut pack_score = 0.0;
             for case_id in pack {
+                let case_timeing = std::time::Instant::now();
+                let case_time: Duration;
                 // case_id += 1;
                 //var to record result
-                let mut case_result=CaseResult::new(case_id as i32);
+                let mut case_result = CaseResult::new(case_id as i32);
                 if is_pack_accepted {
                     case_result = run_one_case(&problem, &out_path, case_id);
                     //let first wrong case result be job result, decide whether go on
                     match case_result.result {
                         MyResult::Accepted => {
-                            pack_score += &problem.cases[case_id - 1].score;
+                            let ratio = problem.misc.dynamic_ranking_ratio.unwrap_or_else(|| 0.0);
+                            pack_score += &problem.cases[case_id - 1].score * (1.0 - ratio);
                         }
                         _ => {
                             if let None = job_result {
@@ -397,7 +402,9 @@ pub fn run_job(
                 } else {
                     case_result.result = MyResult::Skipped;
                 }
-                job.cases[case_id]= case_result;
+                case_time = case_timeing.elapsed();
+                case_result.time = case_time.as_micros() as i32;
+                job.cases[case_id] = case_result;
                 job.update();
             }
             job.score += pack_score;
@@ -408,7 +415,7 @@ pub fn run_job(
     if let Some(r) = job_result {
         job.result = r;
     }
-    if job.score == 100.0 {
+    if job.score == 100.0 * (1 as f64 - problem.misc.dynamic_ranking_ratio.unwrap_or_else(|| 0.0)) {
         job.result = MyResult::Accepted;
     }
     // job_packing_cases(job, config);
@@ -418,9 +425,9 @@ pub fn run_job(
     Ok(())
 }
 
-fn run_one_case(problem: &Problem, out_path: &String, case_id:usize) -> CaseResult {
-    let case=&problem.cases[case_id - 1];
-    let mut case_result=CaseResult::new(case_id as i32);
+fn run_one_case(problem: &Problem, out_path: &String, case_id: usize) -> CaseResult {
+    let case = &problem.cases[case_id - 1];
+    let mut case_result = CaseResult::new(case_id as i32);
     let mut run_case = Command::new(&out_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -468,12 +475,19 @@ fn run_one_case(problem: &Problem, out_path: &String, case_id:usize) -> CaseResu
                             }
                         }
                         ProblemType::Spj => {
-                            let spj_result=special_judge(problem, case,  output);
-                            case_result.result =spj_result.0;
-                            case_result.info=spj_result.1;
+                            let spj_result = special_judge(problem, case, output);
+                            case_result.result = spj_result.0;
+                            case_result.info = spj_result.1;
                         }
                         ProblemType::DynamicRanking => {
-                            case_result.result = MyResult::Waiting
+                            let a: Vec<&str> =
+                                output.split("\n").map(|x| x.trim()).collect();
+                            let b: Vec<&str> = ans.split("\n").map(|x| x.trim()).collect();
+                            if a == b {
+                                case_result.result = MyResult::Accepted;
+                            } else {
+                                case_result.result = MyResult::WrongAnswer;
+                            }
                         }
                     }
                     //got result, update response
@@ -487,9 +501,9 @@ fn run_one_case(problem: &Problem, out_path: &String, case_id:usize) -> CaseResu
     case_result
 }
 
-fn special_judge(problem: &Problem, case: &Case, mut output: String) ->(MyResult,String){
-    let case_result:MyResult;
-    let mut spj_info=String::new();
+fn special_judge(problem: &Problem, case: &Case, output: String) -> (MyResult, String) {
+    let case_result: MyResult;
+    let mut spj_info = String::new();
     let mut spj = problem.misc.special_judge.clone().unwrap();
     let output_file = format!("./problem{}/output", problem.id);
     fs::File::create(&output_file).unwrap()
@@ -514,7 +528,7 @@ fn special_judge(problem: &Problem, case: &Case, mut output: String) ->(MyResult
                 match s {
                     Ok(r) => {
                         case_result = r;
-                    },
+                    }
                     Err(_) => case_result = MyResult::SystemError,
                 }
             }
@@ -522,13 +536,13 @@ fn special_judge(problem: &Problem, case: &Case, mut output: String) ->(MyResult
         match spj_result.lines().nth(1) {
             None => {}
             Some(s) => {
-                spj_info=s.to_string();
+                spj_info = s.to_string();
             }
         }
     } else {
         case_result = MyResult::Accepted;
     }
-    (case_result,spj_info)
+    (case_result, spj_info)
 }
 
 pub fn match_job(require: &GetJob, job: &Job, user_list: &Vec<User>) -> bool {
@@ -594,29 +608,50 @@ pub fn get_user_submissions(user: &User, job_list: &Vec<Job>) -> Vec<Job> {
     sub_list
 }
 
-pub fn get_score_list(a: &Vec<Job>, rule: &RankRule, config: &Config) -> (Vec<f64>, Vec<usize>) {
+///return score list for cases, and their index list for tie break to judge.
+pub fn get_score_list(all_jobs:&Vec<Job>,user_jobs: &Vec<Job>, rule: &RankRule, config: &Config) -> (Vec<f64>, Vec<usize>) {
     let mut scores: Vec<f64> = vec![];
     let mut indexes: Vec<usize> = vec![];
     for problem in config.problems.iter() {
+        //get list of users that can have competitive score.
+        let mut accepted_jobs: Vec<Job> = vec![];
+        for job in all_jobs {
+            if job.submission.problem_id == problem.id {
+                if let MyResult::Accepted = &job.result {
+                    accepted_jobs.push(job.clone());
+                }
+            }
+        }
         let mut score = 0.0;
         let mut time: DateTime<FixedOffset> = chrono::DateTime::default();
         let mut index: usize = 0;
-        for i in 0..a.len() {
-            if a[i].submission.problem_id == problem.id {
-                let i_time: DateTime<FixedOffset> = chrono::DateTime::from_str(&a[i].created_time).unwrap();
+        for job_index in 0..user_jobs.len() {
+            if user_jobs[job_index].submission.problem_id == problem.id {
+                let i_time: DateTime<FixedOffset> = chrono::DateTime::from_str(&user_jobs[job_index].created_time).unwrap();
                 match rule.scoring_rule {
                     ScoringRule::Latest => {
                         if i_time >= time {
                             time = i_time;
-                            score = a[i].score;
-                            index = i;
+                            score = user_jobs[job_index].score;
+                            index = job_index;
                         }
                     }
                     ScoringRule::Highest => {
-                        if a[i].score > score {
-                            score = a[i].score;
-                            index = i;
+                        if user_jobs[job_index].score > score {
+                            score = user_jobs[job_index].score;
+                            index = job_index;
                         }
+                    }
+                }
+                // get dynamic score.
+                if let MyResult::Accepted = user_jobs[job_index].result {
+                    for case_index in 0..problem.cases.len() {
+                        let min_time = accepted_jobs.iter().map(|x| x.cases[case_index+1].time).min().unwrap();
+                        println!("time:{}", min_time);
+                        println!("score1:{}", score);
+                        score += problem.cases[case_index].score * problem.misc.dynamic_ranking_ratio.unwrap_or_else(|| 0.0)
+                            * (min_time as f64 / user_jobs[job_index].cases[case_index+1].time as f64);
+                        println!("score2:{}", score)
                     }
                 }
             }
