@@ -16,7 +16,6 @@ use std::fs;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use chrono::{FixedOffset};
-use oj::Reason::ErrNotFound;
 lazy_static! {
     static ref JOB_LIST: Arc<Mutex<Vec<Job>>> = Arc::new(Mutex::new(Vec::new()));
 }
@@ -52,17 +51,16 @@ async fn post_jobs(body: web::Json<PostJob>, config: web::Data<Config>) -> impl 
     let mut job = Job::new(id as i32, &body.0);
     if job.submission.user_id >= UESR_LIST.lock().unwrap().len() as i32 {
         HttpResponse::NotFound().json(oj::Error {
-            reason: ErrNotFound,
+            reason: Reason::ErrNotFound,
             code: 3,
             message: "User id not found".to_string(),
         })
     } else {
-        // println!("wait!");
         let r = web::block(move || {
             run_job(&mut job, &config, &contest_list, job_list)
-        });
+        }).await;
 
-        match r.await.unwrap() {
+        match r.unwrap() {
             Ok(job) => {
                 lock.push(job.clone());
                 HttpResponse::Ok().json(job)
@@ -71,7 +69,7 @@ async fn post_jobs(body: web::Json<PostJob>, config: web::Data<Config>) -> impl 
                 Reason::ErrInvalidArgument => {
                     HttpResponse::BadRequest().json(err)
                 }
-                ErrNotFound => {
+                Reason::ErrNotFound => {
                     HttpResponse::NotFound().json(err)
                 }
                 Reason::ErrRateLimit => {
@@ -98,7 +96,6 @@ async fn get_jobs(body: web::Query<oj::GetJob>) -> impl Responder {
             return_list.push(i.clone());
         }
     }
-    println!("1");
     return HttpResponse::Ok().json(return_list);
 }
 
@@ -132,7 +129,7 @@ async fn put_job(job_id: web::Path<i32>, config: web::Data<Config>) -> impl Resp
     }
     if let None = job {
         return HttpResponse::NotFound().json(oj::Error {
-            reason: ErrNotFound,
+            reason: Reason::ErrNotFound,
             code: 3,
             message: "Job 123456 not found.".to_string(),
         });
@@ -186,7 +183,7 @@ async fn post_users(user: web::Json<User>) -> impl Responder {
     } else if !is_id_in {
         //appointed id doesn't exist
         HttpResponse::NotFound().json(oj::Error {
-            reason: ErrNotFound,
+            reason: Reason::ErrNotFound,
             code: 3,
             message: format!("User {} already exists.", user.id.unwrap()),
         })
@@ -196,7 +193,26 @@ async fn post_users(user: web::Json<User>) -> impl Responder {
 }
 
 #[post("/contests")]
-async fn post_contest(body: web::Json<Contest>) -> impl Responder {
+async fn post_contest(body: web::Json<Contest>,config:web::Data<Config>) -> impl Responder {
+    let user_list=UESR_LIST.lock().unwrap().to_vec();
+    for user_id in &body.user_ids {
+        if user_list.iter().map(|x|x.id).position(|x|x.unwrap()==*user_id).is_none() {
+            return HttpResponse::NotFound().json(oj::Error {
+                reason: Reason::ErrNotFound,
+                code: 3,
+                message: format!("user {} not found", user_id),
+            })
+        }
+    }
+    for problem_id in &body.problem_ids {
+        if config.problems.iter().map(|x|x.id).position(|x|x==*problem_id).is_none() {
+            return HttpResponse::NotFound().json(oj::Error {
+                reason: Reason::ErrNotFound,
+                code: 3,
+                message: format!("problem{} not found", problem_id),
+            })
+        }
+    }
     let mut contest = body.into_inner();
     let mut contest_list = CONTEST_LIST.lock().unwrap();
     return if contest.id.is_none() {
@@ -207,7 +223,7 @@ async fn post_contest(body: web::Json<Contest>) -> impl Responder {
         match contest_list.iter().map(|x| x.id).position(|x| x == contest.id) {
             None => {
                 HttpResponse::NotFound().json(oj::Error {
-                    reason: ErrNotFound,
+                    reason: Reason::ErrNotFound,
                     code: 3,
                     message: format!("contest{} not found", contest.id.unwrap()),
                 })
@@ -242,7 +258,7 @@ async fn get_contest(contest_id: web::Path<i32>) -> impl Responder {
         None => {
             HttpResponse::NotFound().json(
                 oj::Error {
-                    reason: ErrNotFound,
+                    reason: Reason::ErrNotFound,
                     code: 3,
                     message: "".to_string(),
                 }
@@ -266,7 +282,7 @@ async fn get_rank_list(
     if contest.is_none() {
         return HttpResponse::NotFound().json(
             oj::Error {
-                reason: ErrNotFound,
+                reason: Reason::ErrNotFound,
                 code: 3,
                 message: format!("contest{} not found", contest_id),
             }

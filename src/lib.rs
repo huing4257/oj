@@ -1,15 +1,13 @@
 use std::cmp::Ordering;
-use actix_web;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::fs;
 use std::fs::create_dir;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::Duration;
-use actix_web::{web};
+use actix_web::web;
 use chrono::{DateTime, FixedOffset, Utc};
 use wait_timeout::ChildExt;
 
@@ -300,7 +298,7 @@ pub fn run_job(
     job: &mut Job,
     config: &web::Data<Config>,
     contest_list: &Vec<Contest>,
-    job_list:Vec<Job>
+    job_list: Vec<Job>,
 ) -> Result<Job, Error> {
     //check
     let current_language = config.languages.iter().find(|x| x.name == job.submission.language).cloned();
@@ -332,13 +330,13 @@ pub fn run_job(
                 message: "".to_string(),
             });
         }
-        let mut count =0;
+        let mut count = 0;
         for job_temp in job_list {
-            if job_temp.submission.problem_id==job.submission.problem_id {
-                count +=1;
+            if job_temp.submission.problem_id == job.submission.problem_id {
+                count += 1;
             }
         }
-        if count>=contest.unwrap().submission_limit {
+        if count >= contest.unwrap().submission_limit {
             return Err(Error {
                 reason: Reason::ErrRateLimit,
                 code: 4,
@@ -383,7 +381,6 @@ pub fn run_job(
         .unwrap();
     let out_path = format!("{}/job_{}", dir_path, job.submission.user_id);
     current_language.command[output_index] = out_path.clone();
-    // println!("{:?}", current_language);
 
     //start to compile
     create_dir(&dir_path).unwrap();
@@ -429,10 +426,10 @@ pub fn run_job(
                     match case_result.result {
                         MyResult::Accepted => {
                             let ratio = problem.misc.dynamic_ranking_ratio.unwrap_or_else(|| 0.0);
-                            pack_score += &problem.cases[case_id - 1].score * (1.0 - ratio);
+                            pack_score += problem.cases[case_id - 1].score * (1.0 - ratio);
                         }
                         _ => {
-                            if let None = job_result {
+                            if job_result.is_none() {
                                 job_result = Some(case_result.result.clone())
                             }
                             is_pack_accepted = false;
@@ -455,13 +452,12 @@ pub fn run_job(
     if let Some(r) = job_result {
         job.result = r;
     }
-    if job.score == 100.0 * (1 as f64 - problem.misc.dynamic_ranking_ratio.unwrap_or_else(|| 0.0)) {
+    if job.score == 100.0 * (1.0 - problem.misc.dynamic_ranking_ratio.unwrap_or(0.0)) {
         job.result = MyResult::Accepted;
     }
     // job_packing_cases(job, config);
     job.final_result();
     // let a = serde_json::to_string_pretty(&job).unwrap();
-    // println!("{}", a);
     Ok(job.clone())
 }
 
@@ -655,15 +651,15 @@ pub fn get_user_submissions(contest_id: i32, user: &User, job_list: &Vec<Job>) -
 }
 
 ///return score list for cases, and their index list for tie break to judge.
-pub fn get_score_list(contest:&Contest,all_jobs: &Vec<Job>, user_jobs: &Vec<Job>, rule: &RankRule, config: &Config) -> (Vec<f64>, Vec<usize>) {
+pub fn get_score_list(contest: &Contest, all_jobs: &Vec<Job>, user_jobs: &Vec<Job>, rule: &RankRule, config: &Config) -> (Vec<f64>, Vec<usize>) {
     let mut scores: Vec<f64> = vec![];
     let mut indexes: Vec<usize> = vec![];
-    let problems:Vec<Problem>;
-    if contest.id.unwrap()==0 {
-        problems=config.problems.clone();
-    }else {
-        problems=contest.problem_ids.iter().map(|x| {
-            config.problems.iter().find(|y| y.id ==*x).unwrap()
+    let problems: Vec<Problem>;
+    if contest.id.unwrap() == 0 {
+        problems = config.problems.clone();
+    } else {
+        problems = contest.problem_ids.iter().map(|x| {
+            config.problems.iter().find(|y| y.id == *x).unwrap()
         }).cloned().collect();
     }
     for problem in problems.iter() {
@@ -701,11 +697,8 @@ pub fn get_score_list(contest:&Contest,all_jobs: &Vec<Job>, user_jobs: &Vec<Job>
                 if let MyResult::Accepted = user_jobs[job_index].result {
                     for case_index in 0..problem.cases.len() {
                         let min_time = accepted_jobs.iter().map(|x| x.cases[case_index + 1].time).min().unwrap();
-                        println!("time:{}", min_time);
-                        println!("score1:{}", score);
-                        score += problem.cases[case_index].score * problem.misc.dynamic_ranking_ratio.unwrap_or_else(|| 0.0)
+                        score += problem.cases[case_index].score * problem.misc.dynamic_ranking_ratio.unwrap_or(0.0)
                             * (min_time as f64 / user_jobs[job_index].cases[case_index + 1].time as f64);
-                        println!("score2:{}", score)
                     }
                 }
             }
@@ -724,9 +717,6 @@ pub fn compare_users(a: &Vec<Job>, b: &Vec<Job>, s: (f64, f64), ind: (Vec<usize>
     if a_score == b_score {
         let a = match rule.tie_breaker {
             TieBreaker::SubmissionTime => {
-                let ast = serde_json::to_string_pretty(a).unwrap();
-                let bst = serde_json::to_string_pretty(b).unwrap();
-                println!("{},{}", ast, bst);
                 let a_time: DateTime<FixedOffset> = chrono::DateTime::from_str(&a[*a_index].created_time).unwrap();
                 let b_time: DateTime<FixedOffset> = chrono::DateTime::from_str(&b[*b_index].created_time).unwrap();
                 b_time.cmp(&a_time)
@@ -735,7 +725,6 @@ pub fn compare_users(a: &Vec<Job>, b: &Vec<Job>, s: (f64, f64), ind: (Vec<usize>
                 b.len().cmp(&a.len())
             }
             TieBreaker::UserId => {
-                println!("HELLO!");
                 b[0].submission.user_id.cmp(&a[0].submission.user_id)
             }
             TieBreaker::None => {
