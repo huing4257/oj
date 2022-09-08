@@ -10,6 +10,7 @@ use std::time::Duration;
 use actix_web::web;
 use chrono::{DateTime, FixedOffset, Utc};
 use wait_timeout::ChildExt;
+use actix_web::HttpResponse;
 
 
 pub const TIME_FMT: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
@@ -160,6 +161,28 @@ pub struct Error {
     pub message: String,
 }
 
+impl Error {
+    pub fn to_response(&self) -> HttpResponse {
+        match self.reason {
+            Reason::ErrInvalidArgument => {
+                HttpResponse::BadRequest().json(self)
+            }
+            Reason::ErrNotFound => {
+                HttpResponse::NotFound().json(self)
+            }
+            Reason::ErrRateLimit => {
+                HttpResponse::BadRequest().json(self)
+            }
+            Reason::ErrExternal => {
+                HttpResponse::InternalServerError().json(self)
+            }
+            Reason::ErrInternal => {
+                HttpResponse::InternalServerError().json(self)
+            }
+        }
+    }
+}
+
 ///get formatted current time
 fn my_now() -> String {
     Utc::now().format(TIME_FMT).to_string()
@@ -293,7 +316,8 @@ pub struct Contest {
     pub submission_limit: i32,
 }
 
-///use language, problem information, run a post job update job_list
+///Receive a job, config, contest_list, and job_list, return a updated job
+/// it will return error if job is illegal.
 pub fn run_job(
     job: &mut Job,
     config: &web::Data<Config>,
@@ -461,6 +485,7 @@ pub fn run_job(
     Ok(job.clone())
 }
 
+///Given problem, program path, and case id, run one case and return a result of the case.
 fn run_one_case(problem: &Problem, out_path: &String, case_id: usize) -> CaseResult {
     let case = &problem.cases[case_id - 1];
     let mut case_result = CaseResult::new(case_id as i32);
@@ -537,6 +562,7 @@ fn run_one_case(problem: &Problem, out_path: &String, case_id: usize) -> CaseRes
     case_result
 }
 
+///Run special judge program, return it's result and info string
 fn special_judge(problem: &Problem, case: &Case, output: String) -> (MyResult, String) {
     let case_result: MyResult;
     let mut spj_info = String::new();
@@ -581,6 +607,7 @@ fn special_judge(problem: &Problem, case: &Case, output: String) -> (MyResult, S
     (case_result, spj_info)
 }
 
+///Receive a filter ,a job, and user list, return whether it satisfies.
 pub fn match_job(require: &GetJob, job: &Job, user_list: &Vec<User>) -> bool {
     //any option unsatisfied, return false
     if let Some(parameter) = &require.result {
@@ -634,6 +661,7 @@ pub fn match_job(require: &GetJob, job: &Job, user_list: &Vec<User>) -> bool {
     true
 }
 
+///from a job list, find a user's jobs in a contest
 pub fn get_user_submissions(contest_id: i32, user: &User, job_list: &Vec<Job>) -> Vec<Job> {
     let mut sub_list: Vec<Job> = vec![];
     for job in job_list {
@@ -650,7 +678,7 @@ pub fn get_user_submissions(contest_id: i32, user: &User, job_list: &Vec<Job>) -
     sub_list
 }
 
-///return score list for cases, and their index list for tie break to judge.
+///return score list for cases in a contest, and their index list for tie break to judge.
 pub fn get_score_list(contest: &Contest, all_jobs: &Vec<Job>, user_jobs: &Vec<Job>, rule: &RankRule, config: &Config) -> (Vec<f64>, Vec<usize>) {
     let mut scores: Vec<f64> = vec![];
     let mut indexes: Vec<usize> = vec![];
@@ -709,6 +737,7 @@ pub fn get_score_list(contest: &Contest, all_jobs: &Vec<Job>, user_jobs: &Vec<Jo
     (scores, indexes)
 }
 
+///use rank role and job list to compare two user.
 pub fn compare_users(a: &Vec<Job>, b: &Vec<Job>, s: (f64, f64), ind: (Vec<usize>, Vec<usize>), rule: &RankRule) -> Ordering {
     let (a_score, b_score) = s;
     let (a_indexes, b_indexes) = ind;

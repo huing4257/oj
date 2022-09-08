@@ -9,8 +9,8 @@ use env_logger;
 use lazy_static::lazy_static;
 use log;
 use oj;
-use oj::{compare_users, get_score_list, get_user_submissions, match_job, run_job, Config, Job, PostJob, Reason, User, UserRank, Contest};
-use std::borrow::BorrowMut;
+use oj::{compare_users, get_score_list, get_user_submissions, match_job, run_job,
+         Config, Job, PostJob, Reason, User, UserRank, Contest};
 use std::cmp::Ordering;
 use std::fs;
 use std::ops::Deref;
@@ -49,6 +49,7 @@ async fn post_jobs(body: web::Json<PostJob>, config: web::Data<Config>) -> impl 
     let id = lock.len();
     //create a job
     let mut job = Job::new(id as i32, &body.0);
+    //if user doesn't exist, return error
     if job.submission.user_id >= UESR_LIST.lock().unwrap().len() as i32 {
         HttpResponse::NotFound().json(oj::Error {
             reason: Reason::ErrNotFound,
@@ -56,43 +57,26 @@ async fn post_jobs(body: web::Json<PostJob>, config: web::Data<Config>) -> impl 
             message: "User id not found".to_string(),
         })
     } else {
-        let r = web::block(move || {
+        let result = web::block(move || {
             run_job(&mut job, &config, &contest_list, job_list)
         }).await;
 
-        match r.unwrap() {
+        match result.unwrap() {
             Ok(job) => {
+                //push modified job
                 lock.push(job.clone());
                 HttpResponse::Ok().json(job)
             }
-            Err(err) => match &err.reason {
-                Reason::ErrInvalidArgument => {
-                    HttpResponse::BadRequest().json(err)
-                }
-                Reason::ErrNotFound => {
-                    HttpResponse::NotFound().json(err)
-                }
-                Reason::ErrRateLimit => {
-                    HttpResponse::BadRequest().json(err)
-                }
-                Reason::ErrExternal => {
-                    unimplemented!()
-                }
-                Reason::ErrInternal => {
-                    unimplemented!()
-                }
-            }
+            Err(err) => err.to_response()
         }
-        // HttpResponse::Ok().json("")
     }
-    //push modified job
 }
 
 #[get("/jobs")]
-async fn get_jobs(body: web::Query<oj::GetJob>) -> impl Responder {
+async fn get_jobs(query: web::Query<oj::GetJob>) -> impl Responder {
     let mut return_list: Vec<Job> = vec![];
     for i in &*JOB_LIST.lock().unwrap() {
-        if match_job(&body, i, UESR_LIST.lock().unwrap().as_ref()) {
+        if match_job(&query, i, UESR_LIST.lock().unwrap().as_ref()) {
             return_list.push(i.clone());
         }
     }
@@ -101,13 +85,8 @@ async fn get_jobs(body: web::Query<oj::GetJob>) -> impl Responder {
 
 #[get("/jobs/{job_id}")]
 async fn get_job(job_id: web::Path<i32>) -> impl Responder {
-    let mut job: Option<Job> = None;
     let id: i32 = job_id.into_inner();
-    for i in &*JOB_LIST.lock().unwrap() {
-        if i.id == id {
-            job = Some(i.clone());
-        }
-    }
+    let job = JOB_LIST.lock().unwrap().iter().find(|x| x.id == id).cloned();
     return match job {
         Some(a) => HttpResponse::Ok().json(a),
         None => HttpResponse::NotFound()
@@ -118,15 +97,10 @@ async fn get_job(job_id: web::Path<i32>) -> impl Responder {
 #[put("/jobs/{job_id}")]
 async fn put_job(job_id: web::Path<i32>, config: web::Data<Config>) -> impl Responder {
     let contest_list = CONTEST_LIST.lock().unwrap().to_vec();
-    let mut job: Option<&mut Job> = None;
-    let id: i32 = job_id.into_inner();
     let mut lock = JOB_LIST.lock().unwrap();
+    let id: i32 = job_id.into_inner();
     let job_list = lock.clone();
-    for i in lock.borrow_mut().iter_mut() {
-        if i.id == id {
-            job = Some(i);
-        }
-    }
+    let job = lock.iter_mut().find(|x| x.id == id);
     if let None = job {
         return HttpResponse::NotFound().json(oj::Error {
             reason: Reason::ErrNotFound,
@@ -137,13 +111,12 @@ async fn put_job(job_id: web::Path<i32>, config: web::Data<Config>) -> impl Resp
     let mut job = job.unwrap();
     match run_job(&mut job, &config, &contest_list, job_list) {
         Ok(job_response) => {
-            HttpResponse::Ok().json(job_response);
+            HttpResponse::Ok().json(job_response)
         }
         Err(err) => {
-            HttpResponse::NotFound().json(err);
+            err.to_response()
         }
     }
-    HttpResponse::Ok().json(job.clone())
 }
 
 #[get("/users")]
@@ -193,24 +166,24 @@ async fn post_users(user: web::Json<User>) -> impl Responder {
 }
 
 #[post("/contests")]
-async fn post_contest(body: web::Json<Contest>,config:web::Data<Config>) -> impl Responder {
-    let user_list=UESR_LIST.lock().unwrap().to_vec();
+async fn post_contest(body: web::Json<Contest>, config: web::Data<Config>) -> impl Responder {
+    let user_list = UESR_LIST.lock().unwrap().to_vec();
     for user_id in &body.user_ids {
-        if user_list.iter().map(|x|x.id).position(|x|x.unwrap()==*user_id).is_none() {
+        if user_list.iter().map(|x| x.id).position(|x| x.unwrap() == *user_id).is_none() {
             return HttpResponse::NotFound().json(oj::Error {
                 reason: Reason::ErrNotFound,
                 code: 3,
                 message: format!("user {} not found", user_id),
-            })
+            });
         }
     }
     for problem_id in &body.problem_ids {
-        if config.problems.iter().map(|x|x.id).position(|x|x==*problem_id).is_none() {
+        if config.problems.iter().map(|x| x.id).position(|x| x == *problem_id).is_none() {
             return HttpResponse::NotFound().json(oj::Error {
                 reason: Reason::ErrNotFound,
                 code: 3,
                 message: format!("problem{} not found", problem_id),
-            })
+            });
         }
     }
     let mut contest = body.into_inner();
@@ -276,9 +249,11 @@ async fn get_rank_list(
     rule: web::Query<oj::RankRule>,
     config: web::Data<Config>,
 ) -> impl Responder {
+    //get useful data
     let contest_id = contest_id.into_inner();
     let user_list: Vec<User> = UESR_LIST.lock().unwrap().deref().to_vec();
     let contest = CONTEST_LIST.lock().unwrap().iter().find(|x| x.id.unwrap() == contest_id).cloned();
+    //if contest didn't found return error
     if contest.is_none() {
         return HttpResponse::NotFound().json(
             oj::Error {
@@ -288,10 +263,13 @@ async fn get_rank_list(
             }
         );
     }
+    // contest exists, unwrap, and use it to filter users
     let contest = contest.unwrap();
     let mut user_list: Vec<User> = user_list.iter().filter(|x| contest.user_ids.contains(&x.id.unwrap())).cloned().collect();
     let rule = rule.deref();
     let job_list = JOB_LIST.lock().unwrap().deref().to_vec();
+
+    //sort users by scoring rule at first, and default use id as tie breaker
     user_list.sort_by(|a, b| {
         let a_list = get_user_submissions(contest_id, a, &job_list);
         let b_list = get_user_submissions(contest_id, b, &job_list);
@@ -312,8 +290,8 @@ async fn get_rank_list(
             order
         }
     });
-    let mut rank: Vec<UserRank> = vec![];
 
+    let mut rank: Vec<UserRank> = vec![];
     let list = get_user_submissions(contest_id, &user_list[0], &job_list);
     let scores = get_score_list(&contest, &job_list, &list, rule, config.deref()).0;
     rank.push(UserRank {
