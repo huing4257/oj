@@ -233,6 +233,7 @@ pub enum Reason {
     ErrInvalidArgument,
     #[serde(rename = "ERR_NOT_FOUND")]
     ErrNotFound,
+    #[serde(rename = "ERR_RATE_LIMIT")]
     ErrRateLimit,
     ErrExternal,
     ErrInternal,
@@ -283,25 +284,28 @@ fn scoring_rule_default() -> ScoringRule { ScoringRule::Latest }
 
 fn tie_breaker_default() -> TieBreaker { TieBreaker::None }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Contest {
+    pub id: Option<i32>,
+    pub name: String,
+    pub from: String,
+    pub to: String,
+    pub problem_ids: Vec<i32>,
+    pub user_ids: Vec<i32>,
+    pub submission_limit: i32,
+}
+
 ///use language, problem information, run a post job update job_list
 pub fn run_job(
     job: &mut Job,
     config: &web::Data<Config>,
-) -> Result<(), Error> {
-    let mut current_language: Option<Language> = None;
-    let mut problem: Option<Problem> = None;
-
-    //check and get problem and language
-    for language in &config.languages {
-        if language.name == job.submission.language {
-            current_language = Some(language.clone());
-        }
-    }
-    for problem0 in &config.problems {
-        if problem0.id == job.submission.problem_id {
-            problem = Some(problem0.clone());
-        }
-    }
+    contest_list: &Vec<Contest>,
+    job_list:Vec<Job>
+) -> Result<Job, Error> {
+    //check
+    let current_language = config.languages.iter().find(|x| x.name == job.submission.language).cloned();
+    let problem = config.problems.iter().find(|x| x.id == job.submission.problem_id);
+    let contest = contest_list.iter().find(|x| x.id.unwrap() == job.submission.contest_id);
     if current_language.is_none() || problem.is_none() {
         return Err(Error {
             reason: Reason::ErrNotFound,
@@ -309,11 +313,47 @@ pub fn run_job(
             message: "".to_string(),
         });
     }
+    if job.submission.contest_id != 0 {
+        if contest.is_none() {
+            return Err(Error {
+                reason: Reason::ErrNotFound,
+                code: 3,
+                message: "".to_string(),
+            });
+        }
+        let from_time: DateTime<Utc> = chrono::DateTime::from_str(&contest.unwrap().from).unwrap();
+        let to_time: DateTime<Utc> = chrono::DateTime::from_str(&contest.unwrap().to).unwrap();
+        if !(contest.unwrap().user_ids.contains(&job.submission.user_id) &&
+            contest.unwrap().problem_ids.contains(&job.submission.problem_id) &&
+            Utc::now() > from_time && Utc::now() < to_time) {
+            return Err(Error {
+                reason: Reason::ErrInvalidArgument,
+                code: 1,
+                message: "".to_string(),
+            });
+        }
+        let mut count =0;
+        for job_temp in job_list {
+            if job_temp.submission.problem_id==job.submission.problem_id {
+                count +=1;
+            }
+        }
+        if count>=contest.unwrap().submission_limit {
+            return Err(Error {
+                reason: Reason::ErrRateLimit,
+                code: 4,
+                message: "".to_string(),
+            });
+        }
+    }
+
 
     let mut current_language = current_language.unwrap();
     let problem = problem.unwrap();
 
+    //if uninitialized, let first error become job_result
     let mut job_result: Option<MyResult> = None;
+
     //initialize job cases, clear and push default
     {
         job.result = MyResult::Waiting;
@@ -422,7 +462,7 @@ pub fn run_job(
     job.final_result();
     // let a = serde_json::to_string_pretty(&job).unwrap();
     // println!("{}", a);
-    Ok(())
+    Ok(job.clone())
 }
 
 fn run_one_case(problem: &Problem, out_path: &String, case_id: usize) -> CaseResult {
@@ -439,7 +479,7 @@ fn run_one_case(problem: &Problem, out_path: &String, case_id: usize) -> CaseRes
         .unwrap()
         .write(fs::read_to_string(&case.input_file).unwrap().as_bytes())
         .unwrap();
-    let time_limit = std::time::Duration::from_micros(case.time_limit as u64);
+    let time_limit = Duration::from_micros(case.time_limit as u64);
 
     //use time limit, get case result
     match run_case.wait_timeout(time_limit).unwrap() {
@@ -598,21 +638,35 @@ pub fn match_job(require: &GetJob, job: &Job, user_list: &Vec<User>) -> bool {
     true
 }
 
-pub fn get_user_submissions(user: &User, job_list: &Vec<Job>) -> Vec<Job> {
+pub fn get_user_submissions(contest_id: i32, user: &User, job_list: &Vec<Job>) -> Vec<Job> {
     let mut sub_list: Vec<Job> = vec![];
     for job in job_list {
         if job.submission.user_id == user.id.unwrap() {
-            sub_list.push(job.clone());
+            if contest_id == 0 {
+                sub_list.push(job.clone());
+            } else {
+                if job.submission.contest_id == contest_id {
+                    sub_list.push(job.clone());
+                }
+            }
         }
     }
     sub_list
 }
 
 ///return score list for cases, and their index list for tie break to judge.
-pub fn get_score_list(all_jobs:&Vec<Job>,user_jobs: &Vec<Job>, rule: &RankRule, config: &Config) -> (Vec<f64>, Vec<usize>) {
+pub fn get_score_list(contest:&Contest,all_jobs: &Vec<Job>, user_jobs: &Vec<Job>, rule: &RankRule, config: &Config) -> (Vec<f64>, Vec<usize>) {
     let mut scores: Vec<f64> = vec![];
     let mut indexes: Vec<usize> = vec![];
-    for problem in config.problems.iter() {
+    let problems:Vec<Problem>;
+    if contest.id.unwrap()==0 {
+        problems=config.problems.clone();
+    }else {
+        problems=contest.problem_ids.iter().map(|x| {
+            config.problems.iter().find(|y| y.id ==*x).unwrap()
+        }).cloned().collect();
+    }
+    for problem in problems.iter() {
         //get list of users that can have competitive score.
         let mut accepted_jobs: Vec<Job> = vec![];
         for job in all_jobs {
@@ -646,11 +700,11 @@ pub fn get_score_list(all_jobs:&Vec<Job>,user_jobs: &Vec<Job>, rule: &RankRule, 
                 // get dynamic score.
                 if let MyResult::Accepted = user_jobs[job_index].result {
                     for case_index in 0..problem.cases.len() {
-                        let min_time = accepted_jobs.iter().map(|x| x.cases[case_index+1].time).min().unwrap();
+                        let min_time = accepted_jobs.iter().map(|x| x.cases[case_index + 1].time).min().unwrap();
                         println!("time:{}", min_time);
                         println!("score1:{}", score);
                         score += problem.cases[case_index].score * problem.misc.dynamic_ranking_ratio.unwrap_or_else(|| 0.0)
-                            * (min_time as f64 / user_jobs[job_index].cases[case_index+1].time as f64);
+                            * (min_time as f64 / user_jobs[job_index].cases[case_index + 1].time as f64);
                         println!("score2:{}", score)
                     }
                 }
