@@ -434,15 +434,13 @@ pub fn run_job(
         }
 
         //case by case
-        // let mut case_id = 0;
         for pack in packing {
             let mut is_pack_accepted = true;
             let mut pack_score = 0.0;
             for case_id in pack {
                 let case_timeing = std::time::Instant::now();
                 let case_time: Duration;
-                // case_id += 1;
-                //var to record result
+                //value to record result
                 let mut case_result = CaseResult::new(case_id as i32);
                 if is_pack_accepted {
                     case_result = run_one_case(&problem, &out_path, case_id);
@@ -479,9 +477,7 @@ pub fn run_job(
     if job.score == 100.0 * (1.0 - problem.misc.dynamic_ranking_ratio.unwrap_or(0.0)) {
         job.result = MyResult::Accepted;
     }
-    // job_packing_cases(job, config);
     job.final_result();
-    // let a = serde_json::to_string_pretty(&job).unwrap();
     Ok(job.clone())
 }
 
@@ -509,53 +505,51 @@ fn run_one_case(problem: &Problem, out_path: &String, case_id: usize) -> CaseRes
             case_result.result = MyResult::TimeLimitExceeded;
         }
         Some(s) => {
-            match s.code().unwrap() {
-                0 => {
-                    //run successfully, match result
-                    let out = run_case.stdout;
-                    let mut output = String::new();
-                    out.unwrap().read_to_string(&mut output).unwrap();
-                    let ans = fs::read_to_string(&case.answer_file).unwrap();
+            if s.success() {
 
-                    match &problem.ty {
-                        ProblemType::Standard => {
-                            let a: Vec<&str> =
-                                output.split("\n").map(|x| x.trim()).collect();
-                            let b: Vec<&str> = ans.split("\n").map(|x| x.trim()).collect();
-                            if a == b {
-                                case_result.result = MyResult::Accepted;
-                            } else {
-                                case_result.result = MyResult::WrongAnswer;
-                            }
-                        }
-                        ProblemType::Strict => {
-                            if ans == output {
-                                case_result.result = MyResult::Accepted;
-                            } else {
-                                case_result.result = MyResult::WrongAnswer;
-                            }
-                        }
-                        ProblemType::Spj => {
-                            let spj_result = special_judge(problem, case, output);
-                            case_result.result = spj_result.0;
-                            case_result.info = spj_result.1;
-                        }
-                        ProblemType::DynamicRanking => {
-                            let a: Vec<&str> =
-                                output.split("\n").map(|x| x.trim()).collect();
-                            let b: Vec<&str> = ans.split("\n").map(|x| x.trim()).collect();
-                            if a == b {
-                                case_result.result = MyResult::Accepted;
-                            } else {
-                                case_result.result = MyResult::WrongAnswer;
-                            }
+                //run successfully, match result
+                let out = run_case.stdout;
+                let mut output = String::new();
+                out.unwrap().read_to_string(&mut output).unwrap();
+                let ans = fs::read_to_string(&case.answer_file).unwrap();
+
+                match &problem.ty {
+                    ProblemType::Standard => {
+                        let a: Vec<&str> =
+                            output.split("\n").map(|x| x.trim()).collect();
+                        let b: Vec<&str> = ans.split("\n").map(|x| x.trim()).collect();
+                        if a == b {
+                            case_result.result = MyResult::Accepted;
+                        } else {
+                            case_result.result = MyResult::WrongAnswer;
                         }
                     }
-                    //got result, update response
+                    ProblemType::Strict => {
+                        if ans == output {
+                            case_result.result = MyResult::Accepted;
+                        } else {
+                            case_result.result = MyResult::WrongAnswer;
+                        }
+                    }
+                    ProblemType::Spj => {
+                        let spj_result = special_judge(problem, case, output);
+                        case_result.result = spj_result.0;
+                        case_result.info = spj_result.1;
+                    }
+                    ProblemType::DynamicRanking => {
+                        let a: Vec<&str> =
+                            output.split("\n").map(|x| x.trim()).collect();
+                        let b: Vec<&str> = ans.split("\n").map(|x| x.trim()).collect();
+                        if a == b {
+                            case_result.result = MyResult::Accepted;
+                        } else {
+                            case_result.result = MyResult::WrongAnswer;
+                        }
+                    }
                 }
-                _ => {
-                    case_result.result = MyResult::RuntimeError;
-                }
+                //got result, update response
+            } else {
+                case_result.result = MyResult::RuntimeError;
             }
         }
     }
@@ -644,10 +638,11 @@ pub fn match_job(require: &GetJob, job: &Job, user_list: &Vec<User>) -> bool {
             return false;
         }
     }
-    // if let Some(parameter)=&require.contest_id{
-    //
-    // }
-    //
+    if let Some(parameter)=&require.contest_id{
+        if parameter!=&job.submission.contest_id{
+            return false;
+        }
+    }
     if let Some(parameter) = &require.user_id {
         if parameter != &job.submission.user_id {
             return false;
